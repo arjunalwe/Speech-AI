@@ -1,0 +1,21 @@
+{
+  "session_id": "session_123",
+  "target_word": "Rabbit",
+  "phoneme_analysis": {
+    "target_phoneme": "r",
+    "attempted_phoneme": "w",
+    "is_correct": false,
+    "error_type": "Substitution",
+    "acoustic_score": 42.0
+  },
+  "visual_analysis": {
+    "target_viseme": "liquid_r_shape",
+    "observed_viseme": "labial_w_shape",
+    "visual_match_score": 15.0,
+    "geometric_flaw": "Lips were too rounded; required tongue-tip elevation not detected."
+  },
+  "feedback_payload": {
+    "status": "fail",
+    "feedback": "goo goo gaa gaa"
+  }
+}
