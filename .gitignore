@@ -1,0 +1,46 @@
+# =========================
+# 1. SECRETS & CREDENTIALS
+# =========================
+# NEVER commit these. This protects your Azure and Agentic AI keys.
+.env
+*.env
+.env.local
+
+# =========================
+# 2. PYTHON BACKEND
+# =========================
+# Ignores compiled Python files and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+/env/
+
+# =========================
+# 3. NODE / FRONTEND
+# =========================
+# Your teammate installed MediaPipe. This folder is massive. DO NOT push it.
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# =========================
+# 4. PROJECT SPECIFIC (AUDIO)
+# =========================
+# Remember our FFmpeg bypass? If the server crashes before it deletes 
+# the temp audio files, this prevents you from accidentally committing them.
+*.tmp
+*_out.wav
+*.wav
+*.webm
+
+# =========================
+# 5. OS & IDE JUNK
+# =========================
+# Prevents VS Code settings and Windows/Mac hidden files from cluttering the repo
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
