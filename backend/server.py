@@ -149,24 +149,20 @@ def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: st
     
     if session_type == "articulation":
         if target_phoneme.lower() in ["r", "l"]:
-            # Grab all pucker scores, default to 0 if empty
+            # Grab all pucker scores from the recording
             pucker_scores = [f.shapes.mouthPucker for f in frames]
             max_pucker = max(pucker_scores) if pucker_scores else 0
             
-            # Grab all smile scores
-            smile_scores = [(f.shapes.mouthSmileLeft + f.shapes.mouthSmileRight) / 2 for f in frames]
-            max_smile = max(smile_scores) if smile_scores else 0
-            
-            # THE DEMO FIX: Normal speech pucker is 0.1 - 0.3. 
-            # We ONLY fail them if they make an extreme duck face (> 0.5).
+            # THE DEMO FIX: We only fail if they make an extreme duck face (> 0.5)
+            # Normal talking usually stays below 0.3
             passed = max_pucker < 0.5 
             
             return {
                 "pass": passed,
                 "target_viseme": "liquid_r_shape",
                 "observed_viseme": "liquid_r_shape" if passed else "labial_w_shape",
-                "geometric_flaw": "None" if passed else "Lips were too rounded (made a W shape). Relax your lips!",
-                "metrics": {"pucker": round(max_pucker, 3), "smile": round(max_smile, 3)}
+                "geometric_flaw": "None" if passed else "Lips were too rounded (made a W shape).",
+                "metrics": {"pucker": round(max_pucker, 3)}
             }
         
         if target_phoneme.lower() in ["s", "z"]:

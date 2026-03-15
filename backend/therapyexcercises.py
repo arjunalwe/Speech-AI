@@ -26,16 +26,15 @@ async def generate_exercise_from_analysis(user_profile: dict, session_type: str)
     pragmatics_agent = rt.agent_node(
         name=f"Pragmatics_{uid}", 
         llm=rt.llm.GeminiLLM("gemini/gemini-2.5-flash"), 
-        system_message="""You are a Specialist SLP generating Pragmatic Language exercises.
-        You will receive a user's NAME, AGE, INTAKE GOALS, and their BACKEND ANALYSIS JSON.
+        system_message="""You are a Specialist SLP generating Articulation exercises.
         
-        COLD START RULE:
-        If visual flaw or insight is empty/missing, this is their first time. Do NOT invent past flaws.
-        - Give a warm, general welcome using their name.
-        - Ask a baseline question (e.g., "Can you ask me what my favorite game is?").
+        HOW TO READ THE BACKEND ANALYSIS:
+        - Look at `diagnostic_data.visual_analysis.geometric_flaw`.
+        - IMPORTANT: If geometric_flaw is "None", praise their perfect mouth shape! 
+        - If there is a flaw, give one clear, physical instruction to fix it for the next word.
         
         ADAPTATION RULES:
-        1. Tone: Use the user's NAME to build rapport. Adjust tone strictly based on age.
+        1. CRITICAL: GENERATE A COMPLETELY NEW TARGET WORD. DO NOT REPEAT THE LAST ONE.
         2. Age Buckets: 1-3 (Playful), 4-7 (Imaginative), 8-12 (School), 13+ (Relatable teen/mature contexts).
         3. Target Word Rule: Because this is pragmatics, 'target_word' MUST be empty "".
 
