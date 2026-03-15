@@ -1,279 +1,202 @@
 import {
-FaceLandmarker,
-FilesetResolver
+    FaceLandmarker,
+    FilesetResolver
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32";
 
-const startButton=document.getElementById("startButton");
-const stopButton=document.getElementById("stopButton");
-const statusText=document.getElementById("status");
-const video=document.getElementById("video");
-const audioPlayback=document.getElementById("audioPlayback");
-const jsonOutput=document.getElementById("jsonOutput");
+const video = document.getElementById("video-feed");
+const statusTextAssess = document.getElementById("assessment-status");
+const statusTextPractice = document.getElementById("practice-status");
+const feedbackBubble = document.getElementById("lumi-speech-bubble");
+const visemeAvatar = document.getElementById("viseme-avatar");
 
-let mediaStream=null;
-let mediaRecorder=null;
-let audioChunks=[];
+const currentProfile = { userId: "user_123", focusArea: "articulation" };
+let mediaStream = null;
+let mediaRecorder = null;
+let audioChunks = [];
+let faceLandmarker = null;
+let visualTelemetry = [];
+let recordingStartTime = 0;
+let animationFrameId = null;
+let isTracking = false;
 
-let faceLandmarker=null;
-let visualTelemetry=[];
-let recordingStartTime=0;
-let animationFrameId=null;
-let isTracking=false;
+let audioContext, analyser, microphone, audioTrackingId;
+let maxVolumeSpike = 0, currentSilenceStart = 0, longestSilenceMs = 0;
+const SILENCE_THRESHOLD = 0.05;
 
-const BACKEND_URL="http://localhost:8000/analyze";
+const BACKEND_URL = "http://localhost:8000/analyze";
 
-async function createFaceLandmarker(){
+function switchView(viewId) {
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+    document.getElementById(viewId).classList.add('active');
+}
 
-if(faceLandmarker) return faceLandmarker;
+document.getElementById("btn-go-register").addEventListener("click", () => switchView("view-register"));
+document.getElementById("btn-go-quiz").addEventListener("click", () => switchView("view-quiz"));
+document.getElementById("btn-back-register").addEventListener("click", () => switchView("view-register"));
+document.getElementById("btn-go-assessment").addEventListener("click", () => switchView("view-assessment"));
 
-const vision=await FilesetResolver.forVisionTasks(
-"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm"
-);
-
-faceLandmarker=await FaceLandmarker.createFromOptions(vision,{
-baseOptions:{
-modelAssetPath:
-"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-},
-runningMode:"VIDEO",
-numFaces:1,
-outputFaceBlendshapes:true,
-outputFacialTransformationMatrixes:true
+document.getElementById("btn-save-quiz").addEventListener("click", () => {
+    const selected = document.querySelector('input[name="disorder"]:checked');
+    if (selected) {
+        currentProfile.focusArea = selected.value;
+        document.getElementById("focus-area").innerText = selected.value;
+        switchView("view-dashboard");
+    } else {
+        alert("Please select an area of focus.");
+    }
 });
 
-return faceLandmarker;
+function launchGame(type) {
+    currentProfile.focusArea = type;
+    document.getElementById("practice-title").innerText = `Playing: ${type}`;
+    switchView("view-practice");
 }
 
-function blobToBase64(blob){
+document.getElementById("btn-play-articulation").addEventListener("click", () => launchGame("articulation"));
+document.getElementById("btn-play-stuttering").addEventListener("click", () => launchGame("stuttering"));
+document.getElementById("btn-end-session").addEventListener("click", () => switchView("view-dashboard"));
 
-return new Promise((resolve,reject)=>{
-
-const reader=new FileReader();
-
-reader.onloadend=()=>{
-const result=reader.result;
-resolve(result.split(",")[1]);
-};
-
-reader.onerror=reject;
-
-reader.readAsDataURL(blob);
-
-});
+async function createFaceLandmarker() {
+    if (faceLandmarker) return faceLandmarker;
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm");
+    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
+        runningMode: "VIDEO", numFaces: 1, outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true
+    });
+    return faceLandmarker;
 }
 
-function getBlendshapeScore(result,name){
-
-if(!result.faceBlendshapes||result.faceBlendshapes.length===0){
-return null;
+function getBlendshapeScore(result, name) {
+    if (!result.faceBlendshapes || result.faceBlendshapes.length === 0) return 0.0;
+    const match = result.faceBlendshapes[0].categories.find(c => c.categoryName === name);
+    return match ? Number(match.score.toFixed(4)) : 0.0;
 }
 
-const categories=result.faceBlendshapes[0].categories;
-const match=categories.find(c=>c.categoryName===name);
-
-return match?Number(match.score.toFixed(4)):null;
-
+function trackFaceLoop() {
+    if (!isTracking || !faceLandmarker) return;
+    const now = performance.now();
+    if (video.readyState >= 2) {
+        const result = faceLandmarker.detectForVideo(video, now);
+        if (result.faceLandmarks?.length > 0) {
+            visualTelemetry.push({
+                time_ms: Math.round(now - recordingStartTime),
+                shapes: {
+                    mouthClose: getBlendshapeScore(result, "mouthClose"),
+                    mouthPucker: getBlendshapeScore(result, "mouthPucker"),
+                    mouthSmileLeft: getBlendshapeScore(result, "mouthSmileLeft"),
+                    mouthSmileRight: getBlendshapeScore(result, "mouthSmileRight"),
+                    jawOpen: getBlendshapeScore(result, "jawOpen"),
+                    browInnerUp: getBlendshapeScore(result, "browInnerUp")
+                },
+                pose: { pitch: 0, yaw: 0, roll: 0 }
+            });
+        }
+    }
+    animationFrameId = requestAnimationFrame(trackFaceLoop);
 }
 
-function estimateHeadPose(result){
-
-let pitch=null;
-let yaw=null;
-let roll=null;
-
-const matrices=result.facialTransformationMatrixes;
-
-if(!matrices||matrices.length===0){
-return{pitch,yaw,roll};
+function trackAudioMetrics() {
+    if (!isTracking) return;
+    const dataArray = new Float32Array(analyser.frequencyBinCount);
+    analyser.getFloatTimeDomainData(dataArray);
+    let maxInFrame = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+        let abs = Math.abs(dataArray[i]);
+        if (abs > maxInFrame) maxInFrame = abs;
+    }
+    if (maxInFrame > maxVolumeSpike) maxVolumeSpike = maxInFrame;
+    let now = performance.now();
+    if (maxInFrame < SILENCE_THRESHOLD) {
+        longestSilenceMs = Math.max(longestSilenceMs, now - currentSilenceStart);
+    } else {
+        currentSilenceStart = now;
+    }
+    audioTrackingId = requestAnimationFrame(trackAudioMetrics);
 }
 
-const m=matrices[0].data;
+async function startSession(mode) {
+    try {
+        const statusLabel = mode === "assessment" ? statusTextAssess : statusTextPractice;
+        statusLabel.textContent = "Initializing...";
+        
+        await createFaceLandmarker();
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        video.srcObject = mediaStream;
+        await video.play();
 
-if(!m||m.length<16){
-return{pitch,yaw,roll};
+        visualTelemetry = []; audioChunks = [];
+        maxVolumeSpike = 0; longestSilenceMs = 0;
+        currentSilenceStart = performance.now();
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        microphone = audioContext.createMediaStreamSource(mediaStream);
+        microphone.connect(analyser);
+
+        mediaRecorder = new MediaRecorder(mediaStream);
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+            const audioBase64 = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result.split(",")[1]);
+                reader.readAsDataURL(new Blob(audioChunks, { type: "audio/webm" }));
+            });
+
+            const payload = {
+                user_id: currentProfile.userId,
+                session_mode: mode,
+                session_type: currentProfile.focusArea,
+                target_word: document.getElementById(mode === "assessment" ? "assessment-text" : "practice-prompt").innerText,
+                target_phoneme: "r", 
+                audio_base64: audioBase64,
+                frames: visualTelemetry,
+                audio_metrics: { max_volume_spike: maxVolumeSpike, longest_silence_ms: Math.round(longestSilenceMs) }
+            };
+
+            const response = await fetch(BACKEND_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            
+            if (mode === "practice") {
+                feedbackBubble.innerText = data.nova_feedback || "Great try!";
+                visemeAvatar.innerText = data.status === "success" ? "🌟" : "👄";
+            } else {
+                currentProfile.focusArea = data.session_type;
+                document.getElementById("focus-area").innerText = data.session_type;
+                switchView("view-dashboard");
+            }
+        };
+
+        mediaRecorder.start();
+        recordingStartTime = performance.now();
+        isTracking = true;
+        trackFaceLoop();
+        trackAudioMetrics();
+
+        document.getElementById(`btn-start-${mode}`).disabled = true;
+        document.getElementById(`btn-stop-${mode}`).disabled = false;
+        statusLabel.textContent = "Recording...";
+    } catch (err) {
+        console.error(err);
+    }
 }
 
-const r00=m[0];
-const r10=m[4];
-const r21=m[9];
-const r22=m[10];
-const r20=m[8];
-
-pitch=Math.atan2(-r21,r22)*(180/Math.PI);
-roll=Math.atan2(r10,r00)*(180/Math.PI);
-yaw=Math.atan2(-r20,Math.sqrt(r21*r21+r22*r22))*(180/Math.PI);
-
-return{
-pitch:Number(pitch.toFixed(2)),
-yaw:Number(yaw.toFixed(2)),
-roll:Number(roll.toFixed(2))
-};
+function stopSession(mode) {
+    isTracking = false;
+    cancelAnimationFrame(animationFrameId);
+    cancelAnimationFrame(audioTrackingId);
+    if (audioContext) audioContext.close();
+    if (mediaRecorder) mediaRecorder.stop();
+    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+    
+    document.getElementById(`btn-start-${mode}`).disabled = false;
+    document.getElementById(`btn-stop-${mode}`).disabled = true;
 }
 
-function buildTelemetryFrame(result,elapsedMs){
-
-const pose=estimateHeadPose(result);
-
-return{
-time_ms:Math.round(elapsedMs),
-shapes:{
-mouthClose:getBlendshapeScore(result,"mouthClose"),
-mouthPucker:getBlendshapeScore(result,"mouthPucker"),
-mouthFunnel:getBlendshapeScore(result,"mouthFunnel"),
-mouthRollLower:getBlendshapeScore(result,"mouthRollLower"),
-mouthUpperUp:getBlendshapeScore(result,"mouthUpperUp"),
-jawOpen:getBlendshapeScore(result,"jawOpen"),
-browInnerUp:getBlendshapeScore(result,"browInnerUp")
-},
-pose:{
-pitch:pose.pitch,
-yaw:pose.yaw,
-roll:pose.roll
-}
-};
-}
-
-function trackFaceLoop(){
-
-if(!isTracking||!faceLandmarker) return;
-
-const now=performance.now();
-const elapsedMs=now-recordingStartTime;
-
-if(video.readyState>=2){
-
-const result=faceLandmarker.detectForVideo(video,now);
-
-if(result.faceLandmarks&&result.faceLandmarks.length>0){
-
-const frame=buildTelemetryFrame(result,elapsedMs);
-visualTelemetry.push(frame);
-
-}
-}
-
-animationFrameId=requestAnimationFrame(trackFaceLoop);
-
-}
-
-function getCurrentTimestampUtc(){
-return new Date().toISOString();
-}
-
-async function startRecording(){
-
-try{
-
-statusText.textContent="Loading MediaPipe...";
-await createFaceLandmarker();
-
-statusText.textContent="Requesting camera and microphone...";
-
-mediaStream=await navigator.mediaDevices.getUserMedia({
-video:true,
-audio:true
-});
-
-video.srcObject=mediaStream;
-await video.play();
-
-audioChunks=[];
-visualTelemetry=[];
-
-mediaRecorder=new MediaRecorder(mediaStream);
-
-mediaRecorder.ondataavailable=e=>{
-if(e.data.size>0) audioChunks.push(e.data);
-};
-
-mediaRecorder.onstop=async()=>{
-
-const audioBlob=new Blob(audioChunks,{type:"audio/webm"});
-
-audioPlayback.src=URL.createObjectURL(audioBlob);
-
-const audioBase64=await blobToBase64(audioBlob);
-
-const payload={
-metadata:{
-target_goal:"question_pragmatics",
-timestamp_utc:getCurrentTimestampUtc()
-},
-audio_base64:audioBase64,
-visual_telemetry:visualTelemetry
-};
-
-jsonOutput.textContent=JSON.stringify(payload,null,2);
-
-try{
-
-const response=await fetch(BACKEND_URL,{
-method:"POST",
-headers:{
-"Content-Type":"application/json"
-},
-body:JSON.stringify(payload)
-});
-
-const data=await response.json();
-
-console.log("Backend response:",data);
-
-statusText.textContent="Recording stopped. Payload sent to backend.";
-
-}catch(err){
-
-console.error(err);
-
-statusText.textContent="Recording stopped. Backend request failed.";
-
-}
-
-};
-
-mediaRecorder.start();
-
-recordingStartTime=performance.now();
-isTracking=true;
-
-trackFaceLoop();
-
-startButton.disabled=true;
-stopButton.disabled=false;
-
-statusText.textContent="Recording + tracking...";
-
-}catch(error){
-
-console.error(error);
-
-statusText.textContent="Failed to start recording.";
-
-}
-
-}
-
-function stopRecording(){
-
-isTracking=false;
-
-if(animationFrameId){
-cancelAnimationFrame(animationFrameId);
-}
-
-if(mediaRecorder&&mediaRecorder.state!=="inactive"){
-mediaRecorder.stop();
-}
-
-if(mediaStream){
-mediaStream.getTracks().forEach(track=>track.stop());
-video.srcObject=null;
-}
-
-startButton.disabled=false;
-stopButton.disabled=true;
-
-}
-
-startButton.addEventListener("click",startRecording);
-stopButton.addEventListener("click",stopRecording);
+document.getElementById("btn-start-assessment").addEventListener("click", () => startSession("assessment"));
+document.getElementById("btn-stop-assessment").addEventListener("click", () => stopSession("assessment"));
+document.getElementById("btn-start-practice").addEventListener("click", () => startSession("practice"));
+document.getElementById("btn-stop-practice").addEventListener("click", () => stopSession("practice"));
