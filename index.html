@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speech Therapy Frontend</title>
+
+<style>
+body{
+  font-family: Arial;
+  max-width: 900px;
+  margin: 2rem auto;
+}
+
+video,audio,pre{
+  width:100%;
+  margin-top:1rem;
+}
+
+video{
+  max-width:500px;
+  background:black;
+}
+
+button{
+  margin-right:10px;
+  padding:8px 14px;
+}
+
+pre{
+  background:#f4f4f4;
+  padding:1rem;
+  border-radius:8px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>Speech Therapy Frontend</h1>
+
+<p id="status">Status: Idle</p>
+
+<button id="startButton">Start Recording</button>
+<button id="stopButton" disabled>Stop Recording</button>
+
+<h2>Camera</h2>
+<video id="video" autoplay playsinline muted></video>
+
+<h2>Recorded Audio</h2>
+<audio id="audioPlayback" controls></audio>
+
+<h2>JSON Payload</h2>
+<pre id="jsonOutput">No data yet</pre>
+
+<script type="module" src="./script.js"></script>
+
+</body>
+</html>
