@@ -65,7 +65,9 @@ Finally, we implemented a multi-agent AI system using Railtracks that dynamicall
 
 ## What we learned
 
-One of the biggest lessons from this project was the importance of communication. Since our system combined multiple components across the frontend, backend, and AI services, clear coordination within the team was essential to making everything work together.
+One of our biggest takeaways from this project was the importance of communication. Since the system involved multiple components across the frontend, backend, and AI services, clear coordination within the team was essential.
+
+We also learned how combining LLMs with physical data and traditional machine learning processing can help create more robust AI systems. By grounding AI responses in structured audio and visual data, we were able to reduce hallucinations while still benefiting from the flexibility of large language models.
 
 ## What's next for Lumi
 

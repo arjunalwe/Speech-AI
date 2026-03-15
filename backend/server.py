@@ -3,6 +3,7 @@ import base64
 import asyncio
 import tempfile
 import subprocess
+import re  # <-- Added for advanced stuttering text detection
 import imageio_ffmpeg
 import azure.cognitiveservices.speech as speechsdk
 from fastapi import FastAPI, HTTPException
@@ -149,14 +150,9 @@ def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: st
     
     if session_type == "articulation":
         if target_phoneme.lower() in ["r", "l"]:
-            # Grab all pucker scores from the recording
             pucker_scores = [f.shapes.mouthPucker for f in frames]
             max_pucker = max(pucker_scores) if pucker_scores else 0
-            
-            # THE DEMO FIX: We only fail if they make an extreme duck face (> 0.5)
-            # Normal talking usually stays below 0.3
             passed = max_pucker < 0.5 
-            
             return {
                 "pass": passed,
                 "target_viseme": "liquid_r_shape",
@@ -177,12 +173,8 @@ def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: st
             }
             
     if "pragmatics" in session_type:
-        # Grab all eyebrow raise scores, default to 0 to prevent empty sequence crashes
         brow_scores = [f.shapes.browInnerUp for f in frames]
         peak_brow = max(brow_scores) if brow_scores else 0
-        
-        # DEMO FIX: We just check if they raised their eyebrows AT ALL while talking.
-        # Resting brow is 0.0. A slight raise hits 0.05.
         passed = peak_brow > 0.05 
         
         return {
@@ -197,12 +189,13 @@ def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: st
 
 @app.post("/analyze")
 async def analyze_attempt(session: Session):
-    # USE THE REAL DATA FROM REACT!
     child_name = session.name
     child_age = session.age
     wav = await convert_audio(session.audio_base64)
     azure_data = {}
-    if session.session_type in ["articulation", "pragmatics"]:
+    
+    # We call Azure for both Articulation (accuracy) and Pragmatics (prosody/tone)
+    if session.session_type in ["articulation", "pragmatics", "stuttering"]:
         azure_data = await asyncio.to_thread(call_azure_pronunciation, wav, session.target_word)
     
     vis_data = facial_evaluation(session.frames, session.session_type, session.target_phoneme)
@@ -221,124 +214,119 @@ async def analyze_attempt(session: Session):
         a_pass = score >= 80
 
     elif "pragmatics" in session.session_type:
-        # PRAGMATICS FIX: They are answering a question free-form!
-        # If they spoke at all, they pass the audio portion.
+        score = azure_data.get("prosody_score", 0)
         if len(what_they_said) > 2:
-            score = 100
-            insight = "Spoke clearly"
-            a_pass = True
+            insight = f"Prosody score: {score}"
+            a_pass = True # They spoke, so we pass them, but we will critique the tone
         else:
-            score = 0
             insight = "No speech detected"
             a_pass = False
 
     elif "stuttering" in session.session_type:
-        if session.audio_metrics:
-            if session.audio_metrics.max_volume_spike > 0.8 or session.audio_metrics.longest_silence_ms > 2000:
-                score = 30
-                insight = "Block or hesitation detected"
-            else:
-                score = 95
-                insight = "Smooth flow"
+        # BETTER STUTTER DETECTION:
+        # 1. Lower silence threshold to 1000ms (1 second block)
+        # 2. Use regex to find repeated words (e.g., "The the the dog")
+        text_repetition = re.search(r'\b(\w+)\s+\1\b', what_they_said, re.IGNORECASE)
+        
+        if session.audio_metrics and session.audio_metrics.longest_silence_ms > 1000:
+            score = 30
+            insight = "Block or long hesitation detected"
+        elif text_repetition or "-" in what_they_said:
+            score = 30
+            insight = "Repetition or prolongation detected in speech"
+        else:
+            score = 95
+            insight = "Smooth flow"
         a_pass = score >= 80
 
     v_pass = vis_data.get("pass", False)
-    overall_pass = a_pass and v_pass
+    
+    # ==========================================
+    # DE-WEIGHTING VISUALS FIX:
+    # Visuals from webcams are buggy. We will NOT fail the child if v_pass is False.
+    # We rely primarily on a_pass for success. Visuals just guide the feedback.
+    # ==========================================
+    overall_pass = a_pass 
     status = "success" if overall_pass else "fail"
     visual_flaw = vis_data.get("geometric_flaw", "No visual data")
     
     # ---------------------------------------------------------
-    # CONVERSATIONAL FEEDBACK PROMPT FIX
+    # CONVERSATIONAL FEEDBACK PROMPT
     # ---------------------------------------------------------
-    try:
-        model = gemini.GenerativeModel('gemini-2.5-flash')
-        
-        if "pragmatics" in session.session_type:
-            if overall_pass:
-                prompt = f"The {child_age}-year-old child successfully answered a social question and used great facial expressions! Give a 1-sentence energetic congratulation."
-            else:
-                prompt = f"""You are a pediatric speech therapist. The {child_age}-year-old patient is practicing social pragmatics.
-                What they actually said: "{what_they_said}"
-                Visual flaw: {visual_flaw}
-                Provide 3 sentences of empathetic feedback. Acknowledge what they said, and gently remind them to use their facial expressions (like raising their eyebrows) when talking. DO NOT sound out words or mention 'R' sounds."""
-        else:
-            if overall_pass:
-                prompt = f"The {child_age}-year-old child successfully said '{session.target_word}'. Give them a quick 1-sentence energetic congratulation! Do not use markdown."
-            else:
-                prompt = f"""You an expert pediatric speech therapist. The patient is {child_age} years old. 
-                They are practicing an articulation exercise targeting the word '{session.target_word}'.
-                - Target Phoneme: /{session.target_phoneme}/
-                - What we heard: "{what_they_said}"
-                - Visual Diagnostic: {visual_flaw}
-
-                Provide 3 sentences of conversational feedback:
-                1. Acknowledge what they sounded like.
-                2. Sound out the target word phonetically with dashes (e.g., "RRRR-abbit").
-                3. Give ONE specific, anatomical piece of advice based on the Visual Diagnostic to fix their mouth shape.
-                Do not use bullet points or markdown."""
-        
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        conversational_feedback = response.text.strip().replace("*", "")
-    except Exception as e:
-        print(f"Feedback generation failed: {e}")
-        conversational_feedback = "Good effort! Let's try that one more time."
-    # ------------------------------------------------------------------
-    # RESTORED: Your exact code to generate the conversational feedback
-    # ------------------------------------------------------------------
     conversational_feedback = "Great job!"
+    
     if session.session_mode == "practice":
-        if overall_pass:
-            prompt = f"The {child_age}-year-old child successfully said '{session.target_word}'. Give them a quick 1-sentence energetic congratulation! Do not use markdown."
-        else:
-            prompt = f"""You an expert, highly encouraging pediatric speech therapist. 
-            The patient is {child_age} years old. Adjust your vocabulary and tone perfectly for this age.
-            They are practicing a '{session.session_type}' exercise targeting the word '{session.target_word}'.
-
-            CLINICAL DATA:
-            - Target Phoneme: /{session.target_phoneme}/
-            - What the AI heard them say: "{what_they_said}"
-            - Audio Diagnostic: {insight}
-            - Visual Diagnostic (Webcam): {visual_flaw}
-
-            YOUR TASK:
-            The child did not pass. Provide 3-4 sentences of conversational feedback doing exactly this:
-            1. Gently acknowledge what they actually sounded like based on the data.
-            2. Sound out the target word phonetically with dashes (e.g., "RRRR-abbit") so they hear how to break it down.
-            3. Use the Visual Diagnostic to give ONE specific, anatomical piece of advice on how to move their lips, jaw, or tongue to fix the specific error they made. 
-            Make it empathetic and engaging! Do not use bullet points or markdown."""
-        
         try:
             model = gemini.GenerativeModel('gemini-2.5-flash')
+            
+            if "pragmatics" in session.session_type:
+                if overall_pass and v_pass and score > 80:
+                    prompt = f"The {child_age}-year-old child successfully answered a social question, had great tone, and used facial expressions! Give a 1-sentence energetic congratulation."
+                else:
+                    # TONE ANALYSIS FIX: Fed the prosody score into the prompt
+                    prompt = f"""You are a pediatric speech therapist. The {child_age}-year-old patient is practicing social pragmatics.
+                    - What they said: "{what_they_said}"
+                    - Prosody (Tone) Score: {score}/100. (If below 60, they sounded monotone. If above 80, they sounded lively).
+                    - Visual Diagnostic: {visual_flaw}
+                    
+                    Provide 3 sentences of empathetic feedback:
+                    1. Acknowledge what they said.
+                    2. Analyze their tone of voice based on the Prosody Score (e.g., "I loved your words, but your voice sounded a little sleepy!").
+                    3. If the Visual Diagnostic mentions flat eyebrows, gently remind them to use facial expressions.
+                    DO NOT sound out words or mention 'R' sounds. Do not use markdown."""
+            
+            elif "stuttering" in session.session_type:
+                if overall_pass:
+                    prompt = f"The {child_age}-year-old child read the passage smoothly! Give a 1-sentence energetic congratulation."
+                else:
+                    prompt = f"""You are a pediatric speech therapist. The {child_age}-year-old patient is practicing fluency (stuttering).
+                    - What we heard: "{what_they_said}"
+                    - Diagnostic: {insight}
+                    
+                    Provide 2-3 sentences of empathetic feedback. Acknowledge that they got a little bumpy or stuck, and remind them to take a deep breath and use "smooth, easy speech". Do not use markdown."""
+            
+            else: # Articulation
+                if overall_pass:
+                    prompt = f"The {child_age}-year-old child successfully said '{session.target_word}'. Give them a quick 1-sentence energetic congratulation! Do not use markdown."
+                else:
+                    prompt = f"""You an expert pediatric speech therapist. The patient is {child_age} years old. 
+                    They are practicing an articulation exercise targeting the word '{session.target_word}'.
+                    - Target Phoneme: /{session.target_phoneme}/
+                    - What we heard: "{what_they_said}"
+                    - Visual Diagnostic: {visual_flaw}
+
+                    Provide 3 sentences of conversational feedback:
+                    1. Acknowledge what they sounded like.
+                    2. Sound out the target word phonetically with dashes (e.g., "RRRR-abbit").
+                    3. Give ONE specific, anatomical piece of advice based on the Visual Diagnostic to fix their mouth shape.
+                    Do not use bullet points or markdown."""
+            
             response = await asyncio.to_thread(model.generate_content, prompt)
-            conversational_feedback = response.text.strip()
+            conversational_feedback = response.text.strip().replace("*", "")
         except Exception as e:
-            print(f"RATE LIMIT OR SDK CRASH: {e}")
-            import random
-            fallbacks = [
-                f"I heard you say '{what_they_said}'. Next time, make sure to keep your lips pulled back!",
-                f"You're getting closer! Remember our trick: don't let your lips make an 'O' shape.",
-                f"Good try! I saw your mouth move a little too much. Keep those lips spread wide like a smile!"
-            ]
-            conversational_feedback = random.choice(fallbacks) if not overall_pass else "Awesome job, your form was perfect!"
+            print(f"Feedback generation failed: {e}")
+            conversational_feedback = "Good effort! Let's try that one more time."
+
     # ------------------------------------------------------------------
     # RAILTRACKS: Generate the NEXT exercise 
     # ------------------------------------------------------------------
-    # RAILTRACKS: Generate the NEXT exercise 
     next_exercise_data = None
     if session.session_mode == "practice":
         backend_analysis_payload = {
             "status": status,
             "session_type": session.session_type,
-            "target_word": session.target_word, # <--- ADD THIS SO THE AI KNOWS WHAT THEY SAID
+            "target_word": session.target_word, 
             "animation_triggers": {
                 "expected_phoneme": session.target_phoneme, 
-                "observed_phoneme": "" if a_pass else "error"
+                "observed_phoneme": "" if a_pass else "error",
+                "what_child_said": what_they_said
             },
             "diagnostic_data": {
                 "visual_analysis": {
                     "geometric_flaw": visual_flaw,
                 }
-            }
+            },
+            "feedback": conversational_feedback # Sending the generated feedback to the Railtracks agent!
         }
         
         user_profile = {
@@ -347,16 +335,19 @@ async def analyze_attempt(session: Session):
             "backend_analysis": backend_analysis_payload
         }
         
-        next_exercise_data = await generate_exercise_from_analysis(
-            user_profile=user_profile, 
-            session_type=session.session_type
-        )
+        try:
+            next_exercise_data = await generate_exercise_from_analysis(
+                user_profile=user_profile, 
+                session_type=session.session_type
+            )
+        except Exception as e:
+            print(f"Railtracks generation failed: {e}")
 
     return {
         "status": status,
         "session_mode": session.session_mode,
         "session_type": session.session_type,
-        "conversational_feedback": conversational_feedback, # Exposing this to App.jsx!
+        "conversational_feedback": conversational_feedback,
         "next_turn": next_exercise_data, 
         "animation_triggers": {
             "target_word": session.target_word,
