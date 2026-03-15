@@ -10,10 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
+import google.generativeai as gemini
 
 load_dotenv()
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
 AZURE_REGION = os.getenv("AZURE_REGION")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = FastAPI()
 
@@ -23,6 +25,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+MOCK_DB = {
+    "user_123": {
+        "name": "Leo",
+        "age": 6,
+        "disorder_focus": "articulation"
+    }
+}
+
+gemini.configure(api_key=GEMINI_API_KEY)
 
 class Shapes(BaseModel):
     mouthClose: float = 0.0
@@ -56,6 +68,7 @@ class AudioMetrics(BaseModel):
     longest_silence_ms: int = 0
 
 class Session(BaseModel):
+    user_id: str
     session_mode: str
     session_type: str
     target_word: str
@@ -94,16 +107,20 @@ async def convert_audio(base64_str: str) -> bytes:
 def call_azure_pronunciation(wav_bytes: bytes, reference_text: str) -> dict:
     if wav_bytes == b"fake_audio_bytes":
         return {"words": [], "prosody_score": 0}
+    
     speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_REGION)
     stream_format = speechsdk.audio.AudioStreamFormat(16000, 16, 1)
     push_stream = speechsdk.audio.PushAudioInputStream(stream_format)
     audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+    
     pron_config = speechsdk.PronunciationAssessmentConfig(reference_text, speechsdk.PronunciationAssessmentGradingSystem.HundredMark, speechsdk.PronunciationAssessmentGranularity.Phoneme)
     recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
+    
     pron_config.apply_to(recognizer)
     push_stream.write(wav_bytes)
     push_stream.close()
     result = recognizer.recognize_once_async().get()
+    
     if result.reason == speechsdk.ResultReason.RecognizedSpeech:
         p_res = speechsdk.PronunciationAssessmentResult(result)
         words = []
@@ -113,7 +130,11 @@ def call_azure_pronunciation(wav_bytes: bytes, reference_text: str) -> dict:
                 "accuracy": w.accuracy_score,
                 "phonemes": [{"text": ph.phoneme, "accuracy_score": ph.accuracy_score} for ph in w.phonemes]
             })
-        return {"words": words, "prosody_score": p_res.pronunciation_score}
+        return {
+            "words": words, 
+            "prosody_score": p_res.pronunciation_score,
+            "recognized_text": result.text
+        }
     return {"words": [], "prosody_score": 0}
 
 def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: str) -> dict:
@@ -164,23 +185,37 @@ def facial_evaluation(frames: List[Frame], session_type: str, target_phoneme: st
         }
     return {"pass": False, "target_viseme": "", "observed_viseme": "", "geometric_flaw": "Unknown type", "metrics": {}}
 
-async def generate_nova_response(prompt: str) -> str:
-    return "Great effort! I noticed your technique slipped a little. Let's look at the screen and try to match the shape exactly next time!"
+async def generate_response(prompt: str) -> str:
+    try:
+        model = gemini.GenerativeModel('gemini-1.5-pro')
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        return response.text.replace("*", "") 
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        return "You're doing great! Keep practicing that sound, paying close attention to your mouth shape!"
 
 @app.post("/analyze")
 async def analyze_attempt(session: Session):
+    
+    user_data = MOCK_DB.get(session.user_id, {"age": 5}) 
+    child_age = user_data["age"]
+
     wav = await convert_audio(session.audio_base64)
     azure_data = {}
     if session.session_type in ["articulation", "pragmatics"]:
         azure_data = await asyncio.to_thread(call_azure_pronunciation, wav, session.target_word)
+    
     vis_data = facial_evaluation(session.frames, session.session_type, session.target_phoneme)
+    
     score = 0
     insight = ""
+    what_they_said = azure_data.get("recognized_text", "")
+
     if session.session_type == "articulation":
         if azure_data.get("words"):
             for p in azure_data["words"][0].get("phonemes", []):
                 if p["text"].lower() == session.target_phoneme.lower():
-                    score = p["accuracy_score"]
+                    score = p.get("accuracy_score", 0)
                     break
         insight = f"Phoneme accuracy: {score}"
     elif session.session_type == "pragmatics":
@@ -194,23 +229,54 @@ async def analyze_attempt(session: Session):
             else:
                 score = 95
                 insight = "Smooth flow"
+
     a_pass = score >= 80
-    v_pass = vis_data["pass"]
-    status = "success" if (a_pass and (v_pass if session.session_type == "pragmatics" else True)) else "fail"
+    v_pass = vis_data.get("pass", False)
+    
+    if session.session_type == "pragmatics":
+        overall_pass = a_pass and v_pass
+    else:
+        overall_pass = a_pass
+        
+    status = "success" if overall_pass else "fail"
+    
     dialogue = None
     if session.session_mode == "practice":
-        prompt = f"Nova therapy. Type: {session.session_type}. Word: {session.target_word}. Audio: {insight}. Visual: {vis_data['geometric_flaw']}. Encouraging tip 1-2 sentences."
-        dialogue = await generate_nova_response(prompt)
+        visual_flaw = vis_data.get("geometric_flaw", "No visual data")
+        
+        if overall_pass:
+            prompt = f"The {child_age}-year-old child successfully said '{session.target_word}'. Give them a quick 1-sentence energetic congratulation! Do not use markdown."
+        else:
+            prompt = f"""You an expert, highly encouraging pediatric speech therapist. 
+The patient is {child_age} years old. Adjust your vocabulary and tone perfectly for this age.
+They are practicing a '{session.session_type}' exercise targeting the word '{session.target_word}'.
+
+CLINICAL DATA:
+- Target Phoneme: /{session.target_phoneme}/
+- What the AI heard them say: "{what_they_said}"
+- Audio Diagnostic: {insight}
+- Visual Diagnostic (Webcam): {visual_flaw}
+
+YOUR TASK:
+The child did not pass. Provide 3-4 sentences of conversational feedback doing exactly this:
+1. Gently acknowledge what they actually sounded like based on the data.
+2. Sound out the target word phonetically with dashes (e.g., "RRRR-abbit" or "ssss-nake") so they hear how to break it down.
+3. Use the Visual Diagnostic to give ONE specific, anatomical piece of advice on how to move their lips, jaw, or tongue to fix the specific error they made. 
+Make it empathetic and engaging! Do not use bullet points or markdown."""
+        
+        dialogue = await generate_response(prompt)
+
     return {
         "status": status,
         "session_mode": session.session_mode,
         "session_type": session.session_type,
-        "nova_feedback": dialogue,
+        "feedback": dialogue,
         "animation_triggers": {
             "target_word": session.target_word,
             "failed_word": "" if status == "success" else session.target_word,
-            "target_viseme": vis_data["target_viseme"],
-            "observed_viseme": vis_data["observed_viseme"],
+            "what_child_said": what_they_said, 
+            "target_viseme": vis_data.get("target_viseme", ""),
+            "observed_viseme": vis_data.get("observed_viseme", ""),
             "expected_phoneme": session.target_phoneme,
             "observed_phoneme": "" if a_pass else "error"
         },
@@ -222,8 +288,8 @@ async def analyze_attempt(session: Session):
             },
             "visual_analysis": {
                 "pass": v_pass,
-                "geometric_flaw": vis_data["geometric_flaw"],
-                "metrics": vis_data["metrics"]
+                "geometric_flaw": vis_data.get("geometric_flaw", ""),
+                "metrics": vis_data.get("metrics", {})
             }
         }
     }
