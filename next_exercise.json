@@ -1,12 +1,12 @@
 {
   "frontend_display": {
-    "visual_audio_instructions": "Alright Leo, let's try the 'R' sound again! First, make a HUGE Cheerio smile with your lips, pulling them back wide. Then, make your tongue strong like a little mountain inside your mouth, without letting it touch the front of your teeth. Now, let's say...",
-    "system_question": "Red robot"
+    "visual_audio_instructions": "Let's warm up our speech muscles, Leo! Watch my mouth and try to copy me.",
+    "system_question": "Rabbit"
   },
   "backend_template": {
     "session_mode": "practice",
     "session_type": "articulation",
-    "target_word": "Red robot",
+    "target_word": "Rabbit",
     "target_phoneme": "r"
   }
 }
