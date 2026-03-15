@@ -133,7 +133,7 @@ async def generate_exercise_from_analysis(user_profile: dict, session_type: str)
         # DYNAMIC FALLBACKS SO THE APP NEVER CRASHES DURING THE DEMO
         target_phoneme = user_profile.get("backend_analysis", {}).get("animation_triggers", {}).get("expected_phoneme", "r")
         
-        r_words = ["Rainbow", "Rocket", "Robot", "River", "Rollercoaster", "Rabbit", "Racecar", "Ring"]
+        r_words = ["Rainbow", "Thukuna", "Robot", "River", "Rollercoaster", "Rabbit", "Racecar", "Ring"]
         stutter_prompts = [
             "The quick brown fox jumps over the lazy dog.",
             "I like to eat apples and bananas.",
